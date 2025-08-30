@@ -16,7 +16,7 @@ const app = express();
 const port = process.env.PORT || 8000;
 
 const corsOptions = {
-  origin: "https://yourfrontenddomain.com", // specify your frontend domain here
+  origin: "https://physiospot-frontend.vercel.app/", // specify your frontend domain here
   methods: ["GET", "POST", "PUT", "DELETE"], // restrict methods as needed
 };
 
