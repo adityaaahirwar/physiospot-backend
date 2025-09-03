@@ -1,56 +1,110 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import Booking from "../models/BookingSchema.js";
 import Doctor from "../models/DoctorSchema.js";
-import Stripe from "stripe";
 import User from "../models/UserSchema.js";
+import Razorpay from "razorpay";
+import crypto from "crypto";
 
+// ✅ Razorpay instance
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+// -------------------------
+// Create Order
+// -------------------------
 export const getCheckoutSession = async (req, res) => {
   try {
-    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-    // get the currently booked doctor
+    console.log("➡️ Incoming request to create Razorpay order");
+    console.log("Doctor ID from req.params:", req.params.doctorId);
+    console.log("User ID from token (req.userId):", req.userId);
+
     const doctor = await Doctor.findById(req.params.doctorId);
     const user = await User.findById(req.userId);
 
-    // create checkout session
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      mode: "payment",
-      success_url: `${process.env.CLIENT_SITE_URL}/checkout-success`,
-      cancel_url: `${req.protocol}://${req.get("host")}/doctor/${doctor.id}`,
-      customer_email: user.email,
-      client_reference_id: req.params.doctorId,
-      line_items: [
-        {
-          price_data: {
-            currency: "bdt",
-            unit_amount: doctor.ticketPrice * 100,
-            product_data: {
-              name: doctor.name,
-              description: doctor.bio,
-              images: [doctor.photo],
-            },
-          },
-          quantity: 1,
-        },
-      ],
-    });
+    console.log("Doctor found:", doctor ? doctor._id : "❌ Not Found");
+    console.log("User found:", user ? user._id : "❌ Not Found");
 
-    // Create a booking object with the necessary details
+    if (!doctor || !user) {
+      console.log("❌ Either doctor or user not found, aborting order creation");
+      return res
+        .status(404)
+        .json({ success: false, message: "Doctor or user not found" });
+    }
+
+    const options = {
+      amount: doctor.ticketPrice * 100, // amount in paisa
+      currency: "INR",
+      receipt: `receipt_${Date.now()}`,
+      notes: {
+        doctorId: doctor._id.toString(),
+        userId: user._id.toString(),
+      },
+    };
+
+    console.log("📦 Razorpay order options:", options);
+
+    const order = await razorpay.orders.create(options);
+    console.log("✅ Razorpay order created:", order.id);
+
     const booking = new Booking({
       doctor: doctor._id,
       user: user._id,
       ticketPrice: doctor.ticketPrice,
-      session: session.id,
+      session: order.id,
+      status: "pending",
     });
 
-    // Save the booking object to the database
     await booking.save();
+    console.log("📝 Booking saved with status pending, ID:", booking._id);
 
-    // send the created session as a response
-    res.status(200).json({ success: true, message: "Success", session });
+    res.status(200).json({
+      success: true,
+      message: "Order created successfully",
+      order,
+      key: process.env.RAZORPAY_KEY_ID,
+    });
   } catch (error) {
-    console.log(error);
+    console.error("🔥 Error in getCheckoutSession:", error);
     res
       .status(500)
-      .json({ success: false, message: "Error creating checkout session" });
+      .json({ success: false, message: "Error creating Razorpay order" });
+  }
+};
+
+
+// -------------------------
+// Verify Payment Signature
+// -------------------------
+export const verifyPayment = async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } =
+      req.body;
+
+    const sign = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSign = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(sign.toString())
+      .digest("hex");
+
+    if (razorpay_signature === expectedSign) {
+      await Booking.findOneAndUpdate(
+        { session: razorpay_order_id },
+        { status: "paid", paymentId: razorpay_payment_id }
+      );
+
+      return res.json({
+        success: true,
+        message: "Payment verified successfully",
+      });
+    } else {
+      return res.status(400).json({ success: false, message: "Invalid signature" });
+    }
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ success: false, message: "Error verifying payment" });
   }
 };
